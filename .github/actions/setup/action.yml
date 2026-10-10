@@ -1,0 +1,15 @@
+name: Hex on staging
+description: Install Hex main and point the hexpm repository at staging
+runs:
+  using: composite
+  steps:
+    - uses: erlef/setup-beam@v1
+      with:
+        otp-version: '28'
+        elixir-version: '1.19'
+    - shell: bash
+      run: |
+        mix archive.install github hexpm/hex ref 4f5ade7ef6ab54313052cc90d8dc9fe902464c64 --force
+        curl -fsS https://repo.staging.hex.pm/public_key -o "$RUNNER_TEMP/staging.pem"
+        mix hex.repo set hexpm --url https://repo.staging.hex.pm --public-key "$RUNNER_TEMP/staging.pem"
+        mix hex.info

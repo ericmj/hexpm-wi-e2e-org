@@ -1,0 +1,81 @@
+name: publish
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        type: choice
+        options: [wi_e2e_private_a, wi_e2e_private_dep, wi_e2e_private_b]
+      expect:
+        type: choice
+        options: [success, refused]
+        default: success
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  HEX_API_URL: https://staging.hex.pm/api
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: T20/T21/T22 publish ${{ inputs.package }}, expecting ${{ inputs.expect }}
+        working-directory: packages/${{ inputs.package }}
+        env:
+          PKG_VERSION: 0.1.${{ github.run_number }}
+        run: |
+          set +e
+          mix deps.get > deps.log 2>&1; deps=$?
+          cat deps.log
+          mix hex.publish package --yes > publish.log 2>&1; pub=$?
+          cat publish.log
+          set -e
+          echo "deps.get exit $deps, hex.publish exit $pub"
+          if [ "${{ inputs.expect }}" = success ]; then
+            [ "$deps" -eq 0 ] && [ "$pub" -eq 0 ]
+            grep -q "Authenticated with Workload Identity" publish.log
+            if [ "${{ inputs.package }}" = wi_e2e_private_dep ]; then
+              grep -q "Authenticated to the wi_e2e organization with Workload Identity" deps.log
+            fi
+          else
+            [ "$pub" -ne 0 ]
+          fi
+      - name: T21 exchange for a package outside the allowlist
+        if: inputs.expect == 'refused'
+        run: |
+          . scripts/wi.sh
+          oidc o; exchange "package:wi_e2e/${{ inputs.package }}" o t; expect 403 access_denied "No matching workload identity"
+
+  checks:
+    if: inputs.package == 'wi_e2e_private_a' && inputs.expect == 'success'
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/setup
+      - name: T25 repository token on the API
+        run: |
+          . scripts/wi.sh
+          oidc o; exchange repository:wi_e2e o r; expect 200
+          cp r.token "$RUNNER_TEMP/token"
+          cd packages/wi_e2e_private_a
+          PKG_VERSION=0.0.1 mix hex.build -o "$RUNNER_TEMP/pkg.tar"
+          cd "$GITHUB_WORKSPACE"
+          api POST /repos/wi_e2e/publish "$RUNNER_TEMP/token" "$RUNNER_TEMP/pkg.tar"; expect 401
+          api GET /users/me "$RUNNER_TEMP/token"; expect 403
+      - name: T26 repository token on repo.staging.hex.pm
+        run: |
+          . scripts/wi.sh
+          url=https://repo.staging.hex.pm/repos/wi_e2e/packages/wi_e2e_private_a
+          s=$(repo_status "$url" "$RUNNER_TEMP/token"); echo "with token: $s"; [ "$s" = 200 ]
+          s=$(repo_status "$url"); echo "without token: $s"; [ "$s" != 200 ]
+          s=$(repo_status https://repo.staging.hex.pm/repos/wi_e2e_nope/packages/wi_e2e_private_a "$RUNNER_TEMP/token"); echo "other org with token: $s"; [ "$s" = 401 ]
